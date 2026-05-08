@@ -1,0 +1,316 @@
+import tkinter as tk
+from tkinter import messagebox
+import serial
+import time
+import requests
+import matplotlib
+
+matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
+
+# ===== SETTINGS =====
+SERIAL_PORT = "COM6"
+BAUD_RATE = 9600
+
+MAX_READINGS = 200
+PREDICTION_SECONDS = 30
+
+NTFY_TOPIC = "ecet230-weatherstation"
+NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+
+NOTIFICATION_COOLDOWN = 10  # demo mode: notification every 10 seconds
+
+PRESSURE_DROP_WARNING = -0.003
+HIGH_HUMIDITY = 70.0
+
+
+class WeatherApp(tk.Tk):
+
+    def __init__(self):
+        super().__init__()
+
+        self.title("BME280 Weather Monitor")
+        self.geometry("450x350")
+
+        self.temp_data = []
+        self.humidity_data = []
+        self.pressure_data = []
+
+        self.pred_temp_data = []
+        self.pred_humidity_data = []
+        self.pred_pressure_data = []
+
+        self.ser = None
+        self.fig = None
+        self.last_notification_time = 0
+
+        tk.Label(
+            self,
+            text="BME280 Weather Monitor",
+            font=("Arial", 16, "bold")
+        ).pack(pady=20)
+
+        self.start_btn = tk.Button(
+            self,
+            text="Start Monitoring",
+            width=20,
+            height=2,
+            bg="lightgreen",
+            command=self.start_monitoring
+        )
+        self.start_btn.pack(pady=10)
+
+        self.status_label = tk.Label(self, text="Readings: 0 / 200")
+        self.status_label.pack(pady=5)
+
+        self.prediction_label = tk.Label(
+            self,
+            text="Prediction: Waiting for data...",
+            font=("Arial", 12, "bold"),
+            fg="blue"
+        )
+        self.prediction_label.pack(pady=10)
+
+    def send_phone_notification(self, title, message, force=False):
+        current_time = time.time()
+
+        if not force:
+            if current_time - self.last_notification_time < NOTIFICATION_COOLDOWN:
+                return
+
+        try:
+            requests.post(
+                NTFY_URL,
+                data=message.encode("utf-8"),
+                headers={
+                    "Title": title,
+                    "Priority": "high",
+                    "Tags": "partly_sunny"
+                },
+                timeout=5
+            )
+
+            self.last_notification_time = current_time
+            print("Phone notification sent.")
+
+        except Exception as e:
+            print(f"Notification error: {e}")
+
+    def start_monitoring(self):
+
+        try:
+            self.ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+            time.sleep(2)
+            self.ser.reset_input_buffer()
+
+        except serial.SerialException:
+            messagebox.showerror(
+                "Connection Error",
+                f"Could not connect to {SERIAL_PORT}.\n"
+                "Check Arduino connection and close Serial Monitor."
+            )
+            return
+
+        self.temp_data.clear()
+        self.humidity_data.clear()
+        self.pressure_data.clear()
+
+        self.pred_temp_data.clear()
+        self.pred_humidity_data.clear()
+        self.pred_pressure_data.clear()
+
+        self.last_notification_time = 0
+
+        self.start_btn.config(state=tk.DISABLED, text="Monitoring...")
+
+        self.send_phone_notification(
+            "Weather Station Started",
+            "Monitoring weather conditions.",
+            force=True
+        )
+
+        plt.ion()
+        self.fig, self.ax = plt.subplots()
+        self.fig.canvas.manager.set_window_title("Live BME280 Weather Data")
+
+        self.temp_line, = self.ax.plot([], [], label="Actual Temp °F")
+        self.humidity_line, = self.ax.plot([], [], label="Actual Humidity %RH")
+        self.pressure_line, = self.ax.plot([], [], label="Actual Pressure inHg")
+
+        self.pred_temp_line, = self.ax.plot([], [], linestyle="--", label="Predicted Temp °F")
+        self.pred_humidity_line, = self.ax.plot([], [], linestyle="--", label="Predicted Humidity %RH")
+        self.pred_pressure_line, = self.ax.plot([], [], linestyle="--", label="Predicted Pressure inHg")
+
+        self.prediction_text = self.ax.text(
+            0.02,
+            0.95,
+            "Prediction: Waiting for data...",
+            transform=self.ax.transAxes,
+            fontsize=11,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8)
+        )
+
+        self.ax.set_xlim(0, MAX_READINGS)
+        self.ax.set_ylim(0, 110)
+        self.ax.set_title("Weather Data + Prediction")
+        self.ax.set_xlabel("Reading Number")
+        self.ax.set_ylabel("Temp °F / Humidity % / Pressure inHg")
+        self.ax.legend(loc="upper right")
+        self.ax.grid(True)
+
+        self.read_serial_step()
+
+    def read_serial_step(self):
+
+        if len(self.temp_data) < MAX_READINGS:
+
+            if self.ser.in_waiting:
+
+                try:
+                    line_data = self.ser.readline().decode(
+                        "utf-8",
+                        errors="replace"
+                    ).strip()
+
+                    parts = line_data.split(",")
+
+                    if len(parts) == 3:
+
+                        temp_c = float(parts[0])
+                        humidity = float(parts[1])
+                        pressure_hpa = float(parts[2])
+
+                        temp_f = (temp_c * 9 / 5) + 32
+                        pressure_inhg = pressure_hpa * 0.0295299830714
+
+                        self.temp_data.append(temp_f)
+                        self.humidity_data.append(humidity)
+                        self.pressure_data.append(pressure_inhg)
+
+                        self.make_prediction()
+                        self.make_weather_prediction()
+                        self.update_plot()
+
+                        self.status_label.config(
+                            text=f"Readings: {len(self.temp_data)} / {MAX_READINGS}"
+                        )
+
+                except Exception as e:
+                    print(f"Read error: {e}")
+
+            self.after(100, self.read_serial_step)
+
+        else:
+            self.finish_monitoring()
+
+    def make_prediction(self):
+
+        if len(self.temp_data) < 2:
+            self.pred_temp_data.append(self.temp_data[-1])
+            self.pred_humidity_data.append(self.humidity_data[-1])
+            self.pred_pressure_data.append(self.pressure_data[-1])
+            return
+
+        temp_rate = self.temp_data[-1] - self.temp_data[-2]
+        humidity_rate = self.humidity_data[-1] - self.humidity_data[-2]
+        pressure_rate = self.pressure_data[-1] - self.pressure_data[-2]
+
+        predicted_temp = self.temp_data[-1] + (temp_rate * PREDICTION_SECONDS)
+        predicted_humidity = self.humidity_data[-1] + (humidity_rate * PREDICTION_SECONDS)
+        predicted_pressure = self.pressure_data[-1] + (pressure_rate * PREDICTION_SECONDS)
+
+        self.pred_temp_data.append(predicted_temp)
+        self.pred_humidity_data.append(predicted_humidity)
+        self.pred_pressure_data.append(predicted_pressure)
+
+    def make_weather_prediction(self):
+
+        if len(self.pressure_data) < 5:
+            return
+
+        pressure_change = self.pressure_data[-1] - self.pressure_data[-5]
+        humidity = self.humidity_data[-1]
+        current_temp = self.temp_data[-1]
+        current_pressure = self.pressure_data[-1]
+
+        if pressure_change < PRESSURE_DROP_WARNING and humidity >= HIGH_HUMIDITY:
+            prediction = "Rain likely / storm possible"
+            color = "red"
+
+        elif pressure_change < PRESSURE_DROP_WARNING:
+            prediction = "Weather may worsen"
+            color = "orange"
+
+        elif pressure_change > abs(PRESSURE_DROP_WARNING):
+            prediction = "Clearer weather likely"
+            color = "green"
+
+        else:
+            prediction = "Stable weather"
+            color = "blue"
+
+        self.prediction_label.config(
+            text=f"Prediction: {prediction}",
+            fg=color
+        )
+
+        self.prediction_text.set_text(
+            f"Prediction: {prediction}\n"
+            f"Temp: {current_temp:.1f} °F\n"
+            f"Humidity: {humidity:.1f}% RH\n"
+            f"Pressure: {current_pressure:.2f} inHg"
+        )
+
+        self.send_phone_notification(
+            "Weather Station Update",
+            f"{prediction}\n\n"
+            f"Temperature: {current_temp:.1f} °F\n"
+            f"Humidity: {humidity:.1f}% RH\n"
+            f"Pressure: {current_pressure:.2f} inHg\n"
+            f"Pressure Trend: {pressure_change:.4f} inHg"
+        )
+
+    def update_plot(self):
+
+        x = range(len(self.temp_data))
+
+        self.temp_line.set_xdata(x)
+        self.temp_line.set_ydata(self.temp_data)
+
+        self.humidity_line.set_xdata(x)
+        self.humidity_line.set_ydata(self.humidity_data)
+
+        self.pressure_line.set_xdata(x)
+        self.pressure_line.set_ydata(self.pressure_data)
+
+        self.pred_temp_line.set_xdata(x)
+        self.pred_temp_line.set_ydata(self.pred_temp_data)
+
+        self.pred_humidity_line.set_xdata(x)
+        self.pred_humidity_line.set_ydata(self.pred_humidity_data)
+
+        self.pred_pressure_line.set_xdata(x)
+        self.pred_pressure_line.set_ydata(self.pred_pressure_data)
+
+        try:
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+        except Exception:
+            pass
+
+    def finish_monitoring(self):
+
+        try:
+            if self.ser and self.ser.is_open:
+                self.ser.close()
+        except Exception:
+            pass
+
+        self.start_btn.config(state=tk.NORMAL, text="Start Monitoring")
+        self.status_label.config(text="Readings: 0 / 200")
+
+
+if __name__ == "__main__":
+    app = WeatherApp()
+    app.mainloop()
