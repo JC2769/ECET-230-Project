@@ -10,7 +10,7 @@ The Personalized Weather Station is a custom embedded environmental monitoring s
 - Humidity
 - Atmospheric Pressure
 
-The project was developed as part of ECET 320 and focuses on:
+The project was developed as part of ECET 230 and focuses on:
 
 - Embedded system design
 - PCB development
