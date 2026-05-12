@@ -190,7 +190,7 @@ Shival Panchal
 # Course Information
 
 Institution: New Jersey Institute of Technology (NJIT)  
-Course: ECET 320
+Course: ECET 230
 
 ---
 
