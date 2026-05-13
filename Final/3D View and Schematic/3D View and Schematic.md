@@ -1,7 +1,7 @@
 # Personalized Weather Station
 
 ## 3D PCB Render
-![3D Render](Documents/3D-render.png)
+![3D PCB](Final/Documents/3D_Render.png)
 
 ## Schematic
-![Schematic](Documents/Schematic.png)
+![Schematic](Final/Documents/Schematic.png)
